@@ -1,0 +1,265 @@
+---
+title: "caret_modeling_BS854"
+author: "Divya Sundaresan"
+date: "4/30/2021"
+output: word_document
+---
+
+```{r, include=FALSE}
+library(caret)
+library(caretEnsemble)
+library(dplyr)
+library(grid)
+library(gridExtra)
+library(Amelia)
+library(plotROC)
+library(RANN)  # required for knnInpute
+```
+
+```{r}
+# View Balance -> data seems unbalanced
+table(heart$DEATH_EVENT)
+
+# mutate df response to Death and No Death
+heart <- read.csv('../heart_failure_clinical_dataset.csv')
+
+heart <- heart %>% 
+  mutate(DEATH_EVENT = factor(DEATH_EVENT, 
+                        labels = make.names(c("No_Death", "Death"))))
+# Missing Values
+missmap(heart, main = "Missing values vs observed", x.cex = 0.45)
+
+# VIEW data types
+str(heart)
+```
+
+```{r}
+# Create the training and test datasets
+set.seed(100)
+
+# Step 1: Get row numbers for the training data
+trainRowNumbers <- createDataPartition(heart$DEATH_EVENT, p=0.8, list=FALSE)
+
+# Step 2: Create the training  dataset
+trainData <- heart[trainRowNumbers,]
+
+# Step 3: Create the test dataset
+testData <- heart[-trainRowNumbers,]
+
+# Store X and Y for later use.
+x = trainData[, 1:12]
+y = trainData$DEATH_EVENT
+```
+
+```{r}
+# If Missing Data
+# Create the knn imputation model on the training data 
+preProcess_missingdata_model <- preProcess(trainData, method='knnImpute')
+preProcess_missingdata_model
+
+trainData <- predict(preProcess_missingdata_model, newdata = trainData)
+anyNA(trainData)
+
+# If Categorical Features
+# Creating dummy variables is converting a categorical variable to as many binary variables as here are categories.
+dummies_model <- dummyVars(DEATH_EVENT ~ ., data=trainData)
+
+trainData_mat <- predict(dummies_model, newdata = trainData)
+
+trainData <- data.frame(trainData_mat) # Convert to dataframe
+
+str(trainData) # See the structure of the new dataset
+
+# Normalize
+preProcess_range_model <- preProcess(trainData, method='range')
+trainData <- predict(preProcess_range_model, newdata = trainData)
+
+trainData$Death_event <- y # Append the Y variable
+
+apply(trainData[, 1:12], 2, FUN=function(x){c('min'=min(x), 'max'=max(x))}) # on Binary vals
+```
+
+```{r}
+# boxplot
+featurePlot(x = trainData[, 1:12], 
+            y = trainData$Death_event, 
+            plot = "box",
+            strip=strip.custom(par.strip.text=list(cex=.7)),
+            scales = list(x = list(relation="free"), 
+                          y = list(relation="free")))
+# density plot
+featurePlot(x = trainData[, 1:12], 
+            y = trainData$Death_event, 
+            plot = "density",
+            strip=strip.custom(par.strip.text=list(cex=.7)),
+            scales = list(x = list(relation="free"), 
+                          y = list(relation="free")))
+```
+
+```{r}
+# Computationally select Features using RFE
+set.seed(100)
+options(warn=-1)
+
+subsets <- c(1:5, 7, 9, 12)
+
+ctrl <- rfeControl(functions = rfFuncs,
+                   method = "repeatedcv",
+                   repeats = 5,
+                   verbose = FALSE)
+
+lmProfile <- rfe(x=trainData[, 1:12], y=trainData$Death_event,
+                 sizes = subsets,
+                 rfeControl = ctrl)
+
+lmProfile$results
+predictors(lmProfile)
+
+plot(lmProfile, type=c("g", "o"))
+
+summary(lmProfile)
+
+```
+
+```{r}
+# Run algorithms using  10 fold cross validation
+control <- trainControl(
+  method = 'cv',                   # k-fold cross validation
+  number = 10,                      # number of folds
+  savePredictions = 'final',       # saves predictions for optimal tuning parameter
+  classProbs = T,                  # should class probabilities be returned
+  summaryFunction=twoClassSummary  # results summary function
+) 
+
+metric = "Accuracy"
+
+# LINEAR
+# train model LDA
+
+model_LDA <- train(Death_event~., data=trainData, method="lda", metric=metric, trControl=control, tuneLength =5)
+model_LDA
+a <- plot(varImp(model_LDA, scale=FALSE), main ='LDA')
+
+# NON-LINEAR
+# train model CART
+
+model_cart  <- train(Death_event~., data=trainData, method="rpart", metric=metric, trControl=control, tuneLength =5)
+model_cart
+b <- plot(varImp(model_cart, scale=FALSE), main ='CART')
+
+# train model KNN
+
+model_KNN <- train(Death_event~., data=trainData, method="knn", metric=metric, trControl=control, tuneLength =5)
+model_KNN
+c <- plot(varImp(model_KNN, scale=FALSE), main ='KNN')
+
+# ADVANCED
+# train model SVM
+
+model_svm <- train(Death_event~., data=trainData, method="svmRadial", metric=metric, trControl=control, tuneLength =5)
+model_svm
+d <- plot(varImp(model_svm, scale=FALSE), main ='SVM')
+
+# train model RF
+
+model_RF <- train(Death_event~., data=trainData, method="rf", metric=metric, trControl=control, tuneLength =5)
+model_RF
+
+plot(varImp(model_RF, scale=FALSE), main ='Random Forest')
+
+# train model log
+
+model_log <- train(Death_event~., data=trainData, method="LogitBoost", metric=metric, trControl=control, tuneLength =5)
+model_log
+f <- plot(varImp(model_log, scale=FALSE), main ='Logit-boost')
+
+#grid.arrange(a, b, c, d, e, f, ncol=3,
+#             top="Feature Selection")
+```
+
+```{r}
+# plot Sensativity scores
+results_1 <- resamples(list(lda=model_LDA, cart=model_cart, knn=model_KNN, svm=model_svm, rf=model_RF, logit = model_log))
+summary(results_1)
+
+scales <- list(x=list(relation="free"), y=list(relation="free"))
+bwplot(results_1, scales=scales, layout = c(3, 1))
+```
+
+```{r}
+trainControl <- trainControl(method="repeatedcv", 
+                             number=10, 
+                             repeats=3,
+                             savePredictions=TRUE, 
+                             classProbs=TRUE)
+
+algorithmList <- c('rf', 'knn', 'rpart', 'lda', 'svmRadial', 'LogitBoost')
+
+set.seed(100)
+models <- caretList(Death_event ~ ., data=trainData, trControl=trainControl, methodList=algorithmList) 
+results <- resamples(models)
+summary(results)
+
+scales <- list(x=list(relation="free"), y=list(relation="free"))
+bwplot(results, scales=scales)
+
+```
+
+
+```{r}
+# Preprocess Test Data
+# Step 1: Impute missing values 
+testData2 <- predict(preProcess_missingdata_model, testData)  
+
+# Step 2: Create one-hot encodings (dummy variables)
+testData3 <- predict(dummies_model, testData2)
+
+# Step 3: Transform the features to range between 0 and 1
+testData4 <- predict(preProcess_range_model, testData3)
+
+```
+
+```{r}
+# predict with RF
+predicted <- predict(model_RF, testData4)
+confusionMatrix(reference = testData$DEATH_EVENT, data = predicted, mode='everything', positive='Death')
+
+
+TClass <- factor(c('No Death', 'No Death', "Death", "Death"))
+PClass <- factor(c('No Death', "Death", 'No Death', "Death"))
+Y      <- c(39, 1, 1, 18)
+df <- data.frame(TClass, PClass, Y)
+
+
+ggplot(data =  df, mapping = aes(x = TClass, y = PClass)) +
+  geom_tile(aes(fill = Y), colour = "white") +
+  geom_text(aes(label = sprintf("%1.0f", Y)), vjust = 1) +
+  scale_fill_gradient(low = "blue", high = "red") +
+  theme_bw() + theme(legend.position = "none", axis.title.x=element_blank())
+
+```
+
+```{r}
+# Create and Predict Stacked model
+# Create the trainControl
+set.seed(101)
+stackControl <- trainControl(method="repeatedcv", 
+                             number=10, 
+                             repeats=3,
+                             savePredictions=TRUE, 
+                             classProbs=TRUE)
+
+
+
+# Ensemble the predictions of `models` to form a new combined prediction based on glm
+stack.glm <- caretStack(models, method="glm", metric="Accuracy", trControl=stackControl)
+print(stack.glm)
+
+# Predict on testData
+stack_predicteds <- predict(stack.glm, newdata=testData4)
+head(stack_predicteds)
+
+confusionMatrix(reference = testData$DEATH_EVENT, data = stack_predicteds, mode='everything', positive='Death')
+
+```
+
